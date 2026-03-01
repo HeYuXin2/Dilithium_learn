@@ -381,6 +381,15 @@ void poly_uniform(poly *a,
 * Returns number of sampled coefficients. Can be smaller than len if not enough
 * random bytes were given.
 **************************************************/
+/**
+ * 名称:        rej_eta
+ * 描述： 采样均匀随机系数在[-ETA,ETA]范围内的多项式系数，通过对随机字节数组进行拒绝采样实现
+ * 参数：   - int32_t *a: 指向输出数组的指针（已分配内存）
+ *         - unsigned int len: 要采样的系数数量
+ *        - const uint8_t *buf: 随机字节数组
+ *      - unsigned int buflen: 随机字节数组的长度
+ * 返回值：采样的系数数量。如果没有足够的随机字节，可能小于len
+ */
 static unsigned int rej_eta(int32_t *a,
                             unsigned int len,
                             const uint8_t *buf,
@@ -392,12 +401,15 @@ static unsigned int rej_eta(int32_t *a,
 
   ctr = pos = 0;
   while(ctr < len && pos < buflen) {
+    //4字节适配ETA=4的情况
     t0 = buf[pos] & 0x0F;
     t1 = buf[pos++] >> 4;
-
+//条件编译减少不必要代码
 #if ETA == 2
     if(t0 < 15) {
+      //无除法的模5取余，205/1024约等于1/5，乘以t0后右移10位相当于除以1024再乘以205，得到t0除以5的结果，范围在[0,4]之间
       t0 = t0 - (205*t0 >> 10)*5;
+      //将t0映射到[-2,2]范围内，t0在[0,4]之间，2-t0在[-2,2]之间
       a[ctr++] = 2 - t0;
     }
     if(t1 < 15 && ctr < len) {
@@ -427,8 +439,11 @@ static unsigned int rej_eta(int32_t *a,
 *              - const uint8_t seed[]: byte array with seed of length CRHBYTES
 *              - uint16_t nonce: 2-byte nonce
 **************************************************/
+//根据rhoprime和nonce生成长度为N的多项式a，系数在[-ETA,ETA]范围内
 #if ETA == 2
 #define POLY_UNIFORM_ETA_NBLOCKS ((136 + STREAM256_BLOCKBYTES - 1)/STREAM256_BLOCKBYTES)
+//ETA=2时，系数在[-2,2]范围内，共5个可能值，可以用3比特表示，因此每个字节可以存储2个系数，256个系数需要128字节，但由于拒绝采样的存在，需要多一些字节，因此设置为136字节，最后会被stream256函数处理成128字节的整数倍
+//+blockbyte-1个字节为向上处理操作
 #elif ETA == 4
 #define POLY_UNIFORM_ETA_NBLOCKS ((227 + STREAM256_BLOCKBYTES - 1)/STREAM256_BLOCKBYTES)
 #endif
