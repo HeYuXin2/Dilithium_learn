@@ -88,7 +88,7 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
 *
 * Returns 0 (success)
 **************************************************/
-//计算签名函数
+//计算签名函数的API
 int crypto_sign_signature_internal(uint8_t *sig,
                                    size_t *siglen,
                                    const uint8_t *m,
@@ -116,19 +116,19 @@ int crypto_sign_signature_internal(uint8_t *sig,
 
   /* Compute mu = CRH(tr, pre, msg) */
   shake256_init(&state);            
-  shake256_absorb(&state, tr, TRBYTES);
-  shake256_absorb(&state, pre, prelen);     //pre是啥
-  shake256_absorb(&state, m, mlen);
+  shake256_absorb(&state, tr, TRBYTES);     //tr是公钥的哈希值，用于绑定签名和公钥
+  shake256_absorb(&state, pre, prelen);     //pre是上下文信息，用于区分相同信息下不同的签名场景
+  shake256_absorb(&state, m, mlen);         //m是要签名的消息
   shake256_finalize(&state);
-  shake256_squeeze(mu, CRHBYTES, &state);
+  shake256_squeeze(mu, CRHBYTES, &state);   //mu是消息摘要，结合tr和消息内容生成，确保签名与消息内容绑定
 
   /* Compute rhoprime = CRH(key, rnd, mu) */
   shake256_init(&state);
-  shake256_absorb(&state, key, SEEDBYTES);
-  shake256_absorb(&state, rnd, RNDBYTES);   //rnd是啥
-  shake256_absorb(&state, mu, CRHBYTES);
+  shake256_absorb(&state, key, SEEDBYTES);  //key是私钥中的随机种子，用于生成签名的随机部分，保证了每次签名的唯一性和安全性
+  shake256_absorb(&state, rnd, RNDBYTES);   //rnd是外部提供的随机数，可以增加签名的随机性，防止重放攻击
+  shake256_absorb(&state, mu, CRHBYTES);    //加上μ一起进行哈希
   shake256_finalize(&state);
-  shake256_squeeze(rhoprime, CRHBYTES, &state);
+  shake256_squeeze(rhoprime, CRHBYTES, &state);   //哈希后得到rhoprime，用于后续生成签名的随机多项式向量y
 
   /* Expand matrix and transform vectors */
   polyvec_matrix_expand(mat, rho);  //根据矩阵种子rho生成多项式矩阵
@@ -138,14 +138,14 @@ int crypto_sign_signature_internal(uint8_t *sig,
 
 rej:
   /* Sample intermediate vector y */
-  polyvecl_uniform_gamma1(&y, rhoprime, nonce++); //根据rhoprime和nonce生成长度为L的多项式向量y
+  polyvecl_uniform_gamma1(&y, rhoprime, nonce++); //根据rhoprime和nonce生成长度为L的随机多项式向量y，系数取值在[-Gamma+1,Gamma]
 
   /* Matrix-vector multiplication */
   z = y;                   //复制y到z
   polyvecl_ntt(&z);        //对z中的每个多项式进行NTT变换
   polyvec_matrix_pointwise_montgomery(&w1, mat, &z);  //计算矩阵mat和向量z的乘积，结果存储在w1中
   polyveck_reduce(&w1);      //对w1中的每个多项式系数进行模q约减
-  polyveck_invntt_tomont(&w1);  //对w1中的每个多项式进行逆NTT变换并转换回常规表示
+  polyveck_invntt_tomont(&w1);  //对w1中的每个多项式进行逆NTT变换并转换回常规表示,w1即为承诺
 
   /* Decompose w and call the random oracle */
   polyveck_caddq(&w1);      //将w1中的系数约减到[-q/2,q/2]范围内
@@ -178,20 +178,20 @@ rej:
     goto rej; //检查w0的系数是否超出范围，若超出则重新采样
 
   /* Compute hints for w1 */
-  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
-  polyveck_invntt_tomont(&h);
-  polyveck_reduce(&h);
+  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);   //就算提示h = cp*t0，结果存储在h中
+  polyveck_invntt_tomont(&h); 
+  polyveck_reduce(&h);     
   if(polyveck_chknorm(&h, GAMMA2))
-    goto rej;
+    goto rej; //检查h的系数是否超出范围，若超出则重新采样
 
-  polyveck_add(&w0, &w0, &h);
-  n = polyveck_make_hint(&h, &w0, &w1);
+  polyveck_add(&w0, &w0, &h);   //将h加回w0中
+  n = polyveck_make_hint(&h, &w0, &w1); //根据w0和w1生成提示h，并返回提示的数量n
   if(n > OMEGA)
     goto rej;
 
   /* Write signature */
-  pack_sig(sig, sig, &z, &h);
-  *siglen = CRYPTO_BYTES;
+  pack_sig(sig, sig, &z, &h); //将z和h打包存储到sig中，sig的前32字节存储挑战值，后面存储z和h
+  *siglen = CRYPTO_BYTES;     //设置输出签名长度
   return 0;
 }
 
@@ -260,6 +260,7 @@ int crypto_sign_signature(uint8_t *sig,
 *
 * Returns 0 (success) or -1 (context string too long)
 **************************************************/
+//计算签名，包含上下文信息的API
 int crypto_sign(uint8_t *sm,
                 size_t *smlen,
                 const uint8_t *m,
@@ -293,6 +294,7 @@ int crypto_sign(uint8_t *sm,
 *
 * Returns 0 if signature could be verified correctly and -1 otherwise
 **************************************************/
+//验证签名的内部API
 int crypto_sign_verify_internal(const uint8_t *sig,
                                 size_t siglen,
                                 const uint8_t *m,
@@ -379,6 +381,7 @@ int crypto_sign_verify_internal(const uint8_t *sig,
 *
 * Returns 0 if signature could be verified correctly and -1 otherwise
 **************************************************/
+//验证签名的API，包含上下文信息
 int crypto_sign_verify(const uint8_t *sig,
                        size_t siglen,
                        const uint8_t *m,

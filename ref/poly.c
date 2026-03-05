@@ -468,7 +468,7 @@ void poly_uniform_eta(poly *a,
 }
 
 /*************************************************
-* Name:        poly_uniform_gamma1m1
+* Name:        poly_uniform_gamma1
 *
 * Description: Sample polynomial with uniformly random coefficients
 *              in [-(GAMMA1 - 1), GAMMA1] by unpacking output stream
