@@ -52,5 +52,9 @@ int crypto_sign_open(uint8_t *m, size_t *mlen,
                      const uint8_t *sm, size_t smlen,
                      const uint8_t *ctx, size_t ctxlen,
                      const uint8_t *pk);
-
+#define my_crypto_sign DILITHIUM_NAMESPACE(my_crypto_sign)
+int my_crypto_sign(uint8_t *sm, size_t *smlen,
+                const uint8_t *m, size_t mlen,
+                const uint8_t *ctx, size_t ctxlen,
+                const uint8_t *sk);
 #endif

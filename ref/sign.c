@@ -149,7 +149,7 @@ rej:
 
   /* Decompose w and call the random oracle */
   polyveck_caddq(&w1);      //将w1中的系数约减到[-q/2,q/2]范围内
-  polyveck_decompose(&w1, &w0, &w1);  //将w1分解为高位w0和低位w1
+  polyveck_decompose(&w1, &w0, &w1);  //将w1分解为高位w1和低位w0，w1长10bit，w0为后14bit，截取高位的目的是为了压缩承诺
   polyveck_pack_w1(sig, &w1); //将w1打包存储到sig中
 
   shake256_init(&state);  
@@ -172,21 +172,21 @@ rej:
    * do not reveal secret information */
   polyveck_pointwise_poly_montgomery(&h, &cp, &s2);   //计算cp和s2的点乘，结果存储在h中
   polyveck_invntt_tomont(&h);         //对h中的每个多项式进行逆NTT变换并转换回常规表示
-  polyveck_sub(&w0, &w0, &h);       //将h从w0中减去
+  polyveck_sub(&w0, &w0, &h);       //将h从w0中减去，即保证在不改变高位w1的前提下，使得验签时能正常验证
   polyveck_reduce(&w0);     //对w0中的每个多项式系数进行模q约减
   if(polyveck_chknorm(&w0, GAMMA2 - BETA))  
     goto rej; //检查w0的系数是否超出范围，若超出则重新采样
 
   /* Compute hints for w1 */
-  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);   //就算提示h = cp*t0，结果存储在h中
+  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);   //计算提示h = cp*t0，结果存储在h中
   polyveck_invntt_tomont(&h); 
   polyveck_reduce(&h);     
-  if(polyveck_chknorm(&h, GAMMA2))
+  if(polyveck_chknorm(&h, GAMMA2))  //验证h是否为短向量
     goto rej; //检查h的系数是否超出范围，若超出则重新采样
 
-  polyveck_add(&w0, &w0, &h);   //将h加回w0中
+  polyveck_add(&w0, &w0, &h);   //将h加回w0中，对w0进行修正，使得验签时能正常验证
   n = polyveck_make_hint(&h, &w0, &w1); //根据w0和w1生成提示h，并返回提示的数量n
-  if(n > OMEGA)
+  if(n > OMEGA) //检查提示的数量是否超过OMEGA，若超过则重新采样
     goto rej;
 
   /* Write signature */
@@ -210,6 +210,7 @@ rej:
 *
 * Returns 0 (success) or -1 (context string too long)
 **************************************************/
+//计算签名函数，需要加密信息和上下文信息，内部调用crypto_sign_signature_internal函数实现签名计算
 int crypto_sign_signature(uint8_t *sig,
                           size_t *siglen,
                           const uint8_t *m,
@@ -219,10 +220,10 @@ int crypto_sign_signature(uint8_t *sig,
                           const uint8_t *sk)
 {
   size_t i;
-  uint8_t pre[257];
-  uint8_t rnd[RNDBYTES];
+  uint8_t pre[257]; //前缀缓冲区，包含一个字节的标志位和一个字节的上下文长度，以及最多255字节的上下文信息
+  uint8_t rnd[RNDBYTES];  //随机数缓冲区，用于生成签名的随机部分
 
-  if(ctxlen > 255)
+  if(ctxlen > 255)  //上下文信息长度不能超过255字节
     return -1;
 
   /* Prepare pre = (0, ctxlen, ctx) */
@@ -231,14 +232,14 @@ int crypto_sign_signature(uint8_t *sig,
   for(i = 0; i < ctxlen; i++)
     pre[2 + i] = ctx[i];
 
-#ifdef DILITHIUM_RANDOMIZED_SIGNING
+#ifdef DILITHIUM_RANDOMIZED_SIGNING //如果启用随机化签名，则生成随机数rnd，否则将rnd置零
   randombytes(rnd, RNDBYTES);
 #else
   for(i=0;i<RNDBYTES;i++)
     rnd[i] = 0;
 #endif
 
-  crypto_sign_signature_internal(sig,siglen,m,mlen,pre,2+ctxlen,rnd,sk);
+  crypto_sign_signature_internal(sig,siglen,m,mlen,pre,2+ctxlen,rnd,sk);  //调用内部签名函数计算签名
   return 0;
 }
 
@@ -260,7 +261,7 @@ int crypto_sign_signature(uint8_t *sig,
 *
 * Returns 0 (success) or -1 (context string too long)
 **************************************************/
-//计算签名，包含上下文信息的API
+//计算带有消息的签名函数，输出包含签名和消息的组合
 int crypto_sign(uint8_t *sm,
                 size_t *smlen,
                 const uint8_t *m,
@@ -274,8 +275,32 @@ int crypto_sign(uint8_t *sm,
 
   for(i = 0; i < mlen; ++i)
     sm[CRYPTO_BYTES + mlen - 1 - i] = m[mlen - 1 - i];
-  ret = crypto_sign_signature(sm, smlen, sm + CRYPTO_BYTES, mlen, ctx, ctxlen, sk);
+  ret = crypto_sign_signature(sm, smlen, sm + CRYPTO_BYTES, mlen, ctx, ctxlen, sk); //计算签名并将签名存储在sm的前CRYPTO_BYTES字节中，消息存储在后面
   *smlen += mlen;
+  return ret;
+}
+
+/**
+ * 名称：my_crypto_sign
+ * 描述：重写签名函数，学习用
+ * 参数：与前文一致
+ * 返回值：与前文一致
+ */
+int my_crypto_sign(uint8_t *sm,
+                size_t *smlen,
+                const uint8_t *m,
+                size_t mlen,
+                const uint8_t *ctx,
+                size_t ctxlen,
+                const uint8_t *sk)
+{
+  int ret;
+  size_t i;
+  //sm为消息加签名的存储区，先复制消息部分再将签名存储在前面
+  for(i=0;i<mlen;++i)
+    sm[CRYPTO_BYTES + i] = m[i];
+  ret = crypto_sign_signature(sm, smlen, sm + CRYPTO_BYTES, mlen, ctx, ctxlen, sk); //调用签名函数计算签名
+  *smlen += mlen; //更新签名消息组合的长度
   return ret;
 }
 
@@ -314,13 +339,13 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   polyveck t1, w1, h;
   keccak_state state;
 
-  if(siglen != CRYPTO_BYTES)
+  if(siglen != CRYPTO_BYTES)  //验证签名长度
     return -1;
 
   unpack_pk(rho, &t1, pk);
-  if(unpack_sig(c, &z, &h, sig))
+  if(unpack_sig(c, &z, &h, sig))  //从输入的签名sig中解包出挑战c，向量z和提示h，如果解包失败则返回-1
     return -1;
-  if(polyvecl_chknorm(&z, GAMMA1 - BETA))
+  if(polyvecl_chknorm(&z, GAMMA1 - BETA)) //检查z的系数是否超出范围，若超出则返回-1
     return -1;
 
   /* Compute CRH(H(rho, t1), pre, msg) */
@@ -330,9 +355,10 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   shake256_absorb(&state, pre, prelen);
   shake256_absorb(&state, m, mlen);
   shake256_finalize(&state);
-  shake256_squeeze(mu, CRHBYTES, &state);
+  shake256_squeeze(mu, CRHBYTES, &state); //获取消息摘要μ
 
   /* Matrix-vector multiplication; compute Az - c2^dt1 */
+  /*计算w1 = Az-c(t1*2^d)*/
   poly_challenge(&cp, c);
   polyvec_matrix_expand(mat, rho);
 
@@ -349,16 +375,19 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   polyveck_invntt_tomont(&w1);
 
   /* Reconstruct w1 */
+  /*使用提示重建w1*/
   polyveck_caddq(&w1);
   polyveck_use_hint(&w1, &w1, &h);
   polyveck_pack_w1(buf, &w1);
 
   /* Call random oracle and verify challenge */
+  /*用消息摘要μ和重建的w1计算预测的挑战c2*/
   shake256_init(&state);
   shake256_absorb(&state, mu, CRHBYTES);
   shake256_absorb(&state, buf, K*POLYW1_PACKEDBYTES);
   shake256_finalize(&state);
   shake256_squeeze(c2, CTILDEBYTES, &state);
+  /*验证挑战是否相同，相同则验签成功，不同则失败*/
   for(i = 0; i < CTILDEBYTES; ++i)
     if(c[i] != c2[i])
       return -1;
@@ -451,3 +480,4 @@ badsig:
 
   return -1;
 }
+

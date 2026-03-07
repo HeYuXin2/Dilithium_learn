@@ -27,7 +27,7 @@ int main(void)
     randombytes(m, MLEN);
 
     crypto_sign_keypair(pk, sk);
-    crypto_sign(sm, &smlen, m, MLEN, ctx, CTXLEN, sk);
+    ret = my_crypto_sign(sm, &smlen, m, MLEN, ctx, CTXLEN, sk);
     ret = crypto_sign_open(m2, &mlen, sm, smlen, ctx, CTXLEN, pk);
 
     if(ret) {

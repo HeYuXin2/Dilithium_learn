@@ -64,6 +64,7 @@ int32_t decompose(int32_t *a0, int32_t a) {
 *
 * Returns 1 if overflow.
 **************************************************/
+//计算提示位的函数，判断输入元素的低位是否溢出到高位，如果溢出则返回1，否则返回0
 unsigned int make_hint(int32_t a0, int32_t a1) {
   if(a0 > GAMMA2 || a0 < -GAMMA2 || (a0 == -GAMMA2 && a1 != 0))
     return 1;
