@@ -7,6 +7,7 @@
 #include "randombytes.h"
 #include "symmetric.h"
 #include "fips202.h"
+#include <stdio.h>
 
 /*************************************************
 * Name:        crypto_sign_keypair
@@ -88,7 +89,6 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
 *
 * Returns 0 (success)
 **************************************************/
-//计算签名函数的API
 int crypto_sign_signature_internal(uint8_t *sig,
                                    size_t *siglen,
                                    const uint8_t *m,
@@ -149,8 +149,8 @@ rej:
 
   /* Decompose w and call the random oracle */
   polyveck_caddq(&w1);      //将w1中的系数约减到[-q/2,q/2]范围内
-  polyveck_decompose(&w1, &w0, &w1);  //将w1分解为高位w1和低位w0，w1长10bit，w0为后14bit，截取高位的目的是为了压缩承诺
-  polyveck_pack_w1(sig, &w1); //将w1打包存储到sig中
+  polyveck_decompose(&w1, &w0, &w1);  //将w1分解为高位w1和低位w0，w1长6bit?截取高位的目的是为了压缩承诺
+  polyveck_pack_w1(sig, &w1); //将w1打包存储到sig中，将所有高6位系数?打包成紧凑的字节流
 
   shake256_init(&state);  
   shake256_absorb(&state, mu, CRHBYTES);
@@ -165,8 +165,11 @@ rej:
   polyvecl_invntt_tomont(&z);  //对z中的每个多项式进行逆NTT变换并转换回常规表示
   polyvecl_add(&z, &z, &y);     //将y加到z上
   polyvecl_reduce(&z);      //对z中的每个多项式系数进行模q约减
-  if(polyvecl_chknorm(&z, GAMMA1 - BETA))     
-    goto rej;  //检查z的系数是否超出范围，若超出则重新采样
+  if(polyvecl_chknorm(&z, GAMMA1 - BETA)){
+    printf("\nz norm too big");
+    goto rej;
+  }     
+  //检查z的系数是否超出范围，若超出则重新采样
 
   /* Check that subtracting cs2 does not change high bits of w and low bits
    * do not reveal secret information */
@@ -174,23 +177,33 @@ rej:
   polyveck_invntt_tomont(&h);         //对h中的每个多项式进行逆NTT变换并转换回常规表示
   polyveck_sub(&w0, &w0, &h);       //将h从w0中减去，即保证在不改变高位w1的前提下，使得验签时能正常验证
   polyveck_reduce(&w0);     //对w0中的每个多项式系数进行模q约减
-  if(polyveck_chknorm(&w0, GAMMA2 - BETA))  
-    goto rej; //检查w0的系数是否超出范围，若超出则重新采样
+  if(polyveck_chknorm(&w0, GAMMA2 - BETA))  {
+    printf("\nw0 too big");
+    goto rej;
+  }
+  //检查w0的系数是否超出范围，若超出则重新采样
 
   /* Compute hints for w1 */
-  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);   //计算提示h = cp*t0，结果存储在h中
+  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);   //
   polyveck_invntt_tomont(&h); 
   polyveck_reduce(&h);     
-  if(polyveck_chknorm(&h, GAMMA2))  //验证h是否为短向量
-    goto rej; //检查h的系数是否超出范围，若超出则重新采样
+  if(polyveck_chknorm(&h, GAMMA2)){
+    printf("\nh too big");
+    goto rej;
+  }  //验证h是否为短向量
+    //检查h的系数是否超出范围，若超出则重新采样
 
   polyveck_add(&w0, &w0, &h);   //将h加回w0中，对w0进行修正，使得验签时能正常验证
   n = polyveck_make_hint(&h, &w0, &w1); //根据w0和w1生成提示h，并返回提示的数量n
-  if(n > OMEGA) //检查提示的数量是否超过OMEGA，若超过则重新采样
+  if(n > OMEGA){
+    printf("\nhint too much");
     goto rej;
+  } //检查提示的数量是否超过OMEGA，若超过则重新采样
+  
 
   /* Write signature */
   pack_sig(sig, sig, &z, &h); //将z和h打包存储到sig中，sig的前32字节存储挑战值，后面存储z和h
+  printf("\nsign success!");
   *siglen = CRYPTO_BYTES;     //设置输出签名长度
   return 0;
 }
@@ -294,14 +307,131 @@ int my_crypto_sign(uint8_t *sm,
                 size_t ctxlen,
                 const uint8_t *sk)
 {
-  int ret;
+  uint8_t pre[257];
+  uint8_t rnd[RNDBYTES];
+  uint8_t buf[2*SEEDBYTES + TRBYTES + 2*CRHBYTES + CTILDEBYTES];
+  uint16_t nonce = 0;
+  uint8_t *tr, *rho, *key, *miu, *yseed, *c;
+  polyveck t0, s2, w, w1, w0, h;
+  polyvecl s1, y, mat[K], z;
+  poly cp;
+  keccak_state state;
+  tr = buf;
+  miu = tr + TRBYTES;
+  key = miu + CRHBYTES;
+  yseed = key + SEEDBYTES;
+  rho = yseed + CRHBYTES;
+  c = rho + SEEDBYTES;
   size_t i;
+  
+  if(ctxlen > 255)
+    return -1;
+
   //sm为消息加签名的存储区，先复制消息部分再将签名存储在前面
   for(i=0;i<mlen;++i)
     sm[CRYPTO_BYTES + i] = m[i];
-  ret = crypto_sign_signature(sm, smlen, sm + CRYPTO_BYTES, mlen, ctx, ctxlen, sk); //调用签名函数计算签名
+  pre[0] = 0;
+  pre[1] = ctxlen;
+  for(i = 0; i < ctxlen; ++i)
+    pre[2+i] = ctx[i];
+  //随机化签名启用
+#ifdef DILITHIUM_RANDOMIZED_SIGNING 
+  randombytes(rnd,RNDBYTES);
+#else
+  for(i = 0; i < RNDBYTES; ++i)
+    rnd[i] = 0;
+#endif
+  unpack_sk(rho, tr, key, &t0, &s1, &s2, sk); //从私钥sk中解包出各个部分
+  //生成消息摘要
+  shake256_init(&state);
+  shake256_absorb(&state, tr, TRBYTES);
+  shake256_absorb(&state, pre, 2+ctxlen);
+  shake256_absorb(&state, m, mlen);
+  shake256_finalize(&state);
+  shake256_squeeze(miu, CRHBYTES, &state);
+
+  //生成随机向量y的种子
+  shake256_init(&state);
+  shake256_absorb(&state, key, SEEDBYTES);
+  shake256_absorb(&state, rnd, RNDBYTES);
+  shake256_absorb(&state, miu, CRHBYTES);
+  shake256_finalize(&state);
+  shake256_squeeze(yseed, CRHBYTES, &state);
+
+  //提前将一些多项式ntt处理，避免反复进行ntt
+  polyvec_matrix_expand(mat, rho);
+  polyvecl_ntt(&s1);
+  polyveck_ntt(&s2);
+  polyveck_ntt(&t0);
+rej:
+  //计算承诺
+  polyvecl_uniform_gamma1(&y, yseed, nonce++);
+  z = y;
+  polyvecl_ntt(&z);
+  polyvec_matrix_pointwise_montgomery(&w, mat, &z);
+  polyveck_reduce(&w);
+  polyveck_invntt_tomont(&w);
+  polyveck_caddq(&w);
+
+  //生成挑战值,以及挑战多项式
+  polyveck_decompose(&w1, &w0, &w);
+  polyveck_pack_w1(sm, &w1);
+  shake256_init(&state);
+  shake256_absorb(&state, miu, CRHBYTES);
+  shake256_absorb(&state, sm, K*POLYW1_PACKEDBYTES);
+  shake256_finalize(&state);
+  shake256_squeeze(c, CTILDEBYTES, &state);
+  poly_challenge(&cp, c);
+
+  //计算响应z
+  poly_ntt(&cp);
+  polyvecl_pointwise_poly_montgomery(&z, &cp, &s1);
+  polyvecl_reduce(&z);
+  polyvecl_invntt_tomont(&z);
+  polyvecl_add(&z, &z, &y);
+  polyvecl_reduce(&z);
+
+  //响应z的系数检查
+  if(polyvecl_chknorm(&z, GAMMA1 - BETA)){
+    printf("\nz norm error");
+    goto rej;
+  }
+    
+  //计算提示h，对w0进行修正,减去cs2
+  polyveck_pointwise_poly_montgomery(&h, &cp, &s2);
+  polyveck_reduce(&h);
+  polyveck_invntt_tomont(&h);
+  polyveck_sub(&w0, &w0, &h);
+  polyveck_reduce(&w0);
+  if(polyveck_chknorm(&w0, GAMMA2 - BETA)){
+    printf("\nw0 too big");
+    goto rej;
+  }  //检查系数是为了防止溢出到高位？
+    
+
+  //修正加上ct0
+  polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
+  // polyveck_reduce(&h);
+  polyveck_invntt_tomont(&h);
+  if(polyveck_chknorm(&h, GAMMA2)){
+    printf("\n h too big");
+    goto rej;
+  }
+  polyveck_add(&w0, &w0, &h);
+
+  //生成提示并检查提示数量
+  i = polyveck_make_hint(&h, &w0, &w1);
+  if(i > OMEGA){
+    printf("\nhint too much");
+    goto rej;
+  }
+    
+  //打包签名并加上签名长度
+  pack_sig(sm, c, &z, &h);
+  printf("\nsign success!");
+  *smlen = CRYPTO_BYTES;
   *smlen += mlen; //更新签名消息组合的长度
-  return ret;
+  return 0;
 }
 
 /*************************************************
