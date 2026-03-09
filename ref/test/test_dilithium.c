@@ -26,8 +26,8 @@ int main(void)
   for(i = 0; i < NTESTS; ++i) {
     randombytes(m, MLEN);
 
-    crypto_sign_keypair(pk, sk);
-    ret = my_crypto_sign(sm, &smlen, m, MLEN, ctx, CTXLEN, sk);
+    my_crypto_sign_keypair(pk, sk);
+    ret = crypto_sign(sm, &smlen, m, MLEN, ctx, CTXLEN, sk);
     ret = crypto_sign_open(m2, &mlen, sm, smlen, ctx, CTXLEN, pk);
 
     if(ret) {

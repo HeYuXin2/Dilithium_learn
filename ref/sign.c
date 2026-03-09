@@ -33,7 +33,7 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   /* Get randomness for rho, rhoprime and key */
   randombytes(seedbuf, SEEDBYTES);  //生成随机种子
   seedbuf[SEEDBYTES+0] = K;       
-  seedbuf[SEEDBYTES+1] = L;       //种子末尾加上K和L以区分不同安全等级
+  seedbuf[SEEDBYTES+1] = L;       //种子末尾加上K和L以区分不同安全等级,确保不同安全等级生成的种子不同
   shake256(seedbuf, 2*SEEDBYTES + CRHBYTES, seedbuf, SEEDBYTES+2);  //种子拓展函数，34位拓展到128位
   rho = seedbuf;                     //rho:前32字节指针
   rhoprime = rho + SEEDBYTES;     //rhoprime:中间64字节指针
@@ -611,3 +611,136 @@ badsig:
   return -1;
 }
 
+int my_crypto_sign_open(uint8_t *m,
+                        size_t *mlen,
+                        const uint8_t *sm,
+                        size_t smlen,
+                        const uint8_t *ctx,
+                        size_t ctxlen,
+                        const uint8_t *pk)
+{
+  size_t i;
+  uint8_t pre[257];
+  uint8_t buf[SEEDBYTES + 2*CTILDEBYTES + K*POLYW1_PACKEDBYTES + CRHBYTES + TRBYTES];
+  uint8_t *rho, *c ,*c2, *w1byte, *miu, *tr;
+  polyveck t1, w1, h, temp1, temp2;
+  polyvecl mat[K], z;
+  poly cp;
+  keccak_state state;
+
+  rho = buf;
+  c = rho + SEEDBYTES;
+  c2 = c + CTILDEBYTES;
+  w1byte = c2 + CTILDEBYTES;
+  miu = w1byte + K*POLYW1_PACKEDBYTES;
+  tr = miu + CRHBYTES;
+  //计算消息的长度和指针
+  if(smlen < CRYPTO_BYTES)
+    return -1;
+  *mlen = smlen - CRYPTO_BYTES;
+  
+
+  //计算并复制上下文信息
+  if(ctxlen > 255){
+    return -1;
+  }
+  pre[0] = 0;
+  pre[1] = ctxlen;
+  for(i = 0; i < ctxlen; i++){
+    pre[i+2] = ctx[i];
+  }
+
+  //解包公钥和签名中的信息
+  unpack_pk(rho, &t1, pk);
+  unpack_sig(c, &z, &h, sm);
+
+  //计算Az - (t1*2^d)cp = w1
+  polyvecl_ntt(&z);
+  polyvec_matrix_expand(mat, rho);
+  polyvec_matrix_pointwise_montgomery(&temp1, mat, &z);
+  poly_challenge(&cp, c);
+  poly_ntt(&cp);
+  polyveck_shiftl(&t1);
+  polyveck_ntt(&t1);
+  polyveck_pointwise_poly_montgomery(&temp2, &cp, &t1);
+  polyveck_sub(&w1, &temp1, &temp2);
+  polyveck_reduce(&w1);
+  polyveck_invntt_tomont(&w1);
+
+  //使用提示还原w1
+  polyveck_caddq(&w1);
+  polyveck_use_hint(&w1, &w1, &h);
+
+  //获取消息摘要
+  shake256(tr, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
+  shake256_init(&state);
+  shake256_absorb(&state, tr, TRBYTES);
+  shake256_absorb(&state, pre, ctxlen+2);
+  shake256_absorb(&state, sm + CRYPTO_BYTES, *mlen);
+  shake256_finalize(&state);
+  shake256_squeeze(miu, CRHBYTES, &state);
+
+  //还原挑战值
+  shake256_init(&state);
+  shake256_absorb(&state, miu, CRHBYTES);
+  polyveck_pack_w1(w1byte, &w1);
+  shake256_absorb(&state, w1byte, K*POLYW1_PACKEDBYTES);
+  shake256_finalize(&state);
+  shake256_squeeze(c2, CTILDEBYTES, &state);
+
+  for(i = 0;i < CTILDEBYTES; i++){
+    if(c[i]!=c2[i])
+      return -1;
+  }
+
+  //当两个挑战值一致，则验签成功，提取消息值
+  for(i = 0; i < *mlen; i++){
+    m[i] = sm[CRYPTO_BYTES + i];
+  }
+  return 0;
+}
+
+int my_crypto_sign_keypair(uint8_t *pk, uint8_t *sk){
+  uint8_t seedbuf[2*SEEDBYTES + CRHBYTES];
+  uint8_t tr[TRBYTES];
+  const uint8_t *rho, *sseed, *key;
+  polyveck s2, t, t1, t0;
+  polyvecl s1, mat[K], s1hat;
+  size_t nonce = 0;
+
+  //生成随机种子,一个用于生成矩阵，一个用于生成两个随机短向量
+  randombytes(seedbuf, SEEDBYTES);
+  seedbuf[SEEDBYTES] = K;
+  seedbuf[SEEDBYTES + 1] = L;
+  shake256(seedbuf, 2*SEEDBYTES + CRHBYTES, seedbuf, SEEDBYTES + 2);
+  rho = seedbuf;
+  sseed = rho + SEEDBYTES;
+  key = sseed + CRHBYTES;
+
+  //生成随机短向量s1和s2
+  polyvecl_uniform_eta(&s1, sseed, nonce);
+  polyveck_uniform_eta(&s2, sseed, nonce++);
+
+  
+  //计算t = As1 + s2
+  s1hat = s1;
+  polyvecl_ntt(&s1hat);
+  polyvec_matrix_expand(mat, rho);
+  polyvec_matrix_pointwise_montgomery(&t, mat, &s1hat);
+  polyveck_reduce(&t);
+  polyveck_invntt_tomont(&t);
+  polyveck_add(&t, &t, &s2);
+  polyveck_reduce(&t);
+  polyveck_caddq(&t);
+
+  //截取t的高位并包装到公钥内
+  polyveck_power2round(&t1, &t0, &t);
+  pack_pk(pk, rho, &t1);
+
+  //计算公钥哈希
+  shake256(tr, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
+
+  //封装私钥
+  pack_sk(sk, rho, tr, key, &t0, &s1, &s2);
+  return 0;
+}

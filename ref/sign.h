@@ -10,6 +10,9 @@
 #define crypto_sign_keypair DILITHIUM_NAMESPACE(keypair)
 int crypto_sign_keypair(uint8_t *pk, uint8_t *sk);
 
+#define my_crypto_sign_keypair DILITHIUM_NAMESPACE(my_keypair)
+int my_crypto_sign_keypair(uint8_t *pk, uint8_t *sk);
+
 #define crypto_sign_signature_internal DILITHIUM_NAMESPACE(signature_internal)
 int crypto_sign_signature_internal(uint8_t *sig,
                                    size_t *siglen,
@@ -58,3 +61,8 @@ int my_crypto_sign(uint8_t *sm, size_t *smlen,
                 const uint8_t *ctx, size_t ctxlen,
                 const uint8_t *sk);
 #endif
+#define my_crypto_sign_open DILITHIUM_NAMESPACE(my_open)
+int my_crypto_sign_open(uint8_t *m, size_t *mlen,
+                     const uint8_t *sm, size_t smlen,
+                     const uint8_t *ctx, size_t ctxlen,
+                     const uint8_t *pk);
